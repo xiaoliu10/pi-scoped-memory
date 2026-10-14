@@ -76,3 +76,10 @@ PI_SCOPED_MEMORY_HOME=$T pi -ne -e $PWD -p "逐字重复你系统提示中 Scope
 ## License
 
 MIT
+
+## 从旧记忆系统迁移
+
+- **pi-memory（全局）**：全局层原位兼容（`~/.pi/agent/memory/`），装上新插件即生效；30 个事实若不在 MEMORY.md 索引里可跑一次补录（见仓库 scripts）。
+- **ZCode 项目记忆**：`~/.zcode/cli/memories/projects/<slug>-<hash>/` 与本项目 `<home>/memory-projects/<slug>-<hash>/` **哈希键完全同构**——直接整目录拷贝即可（`cp -R ~/.zcode/cli/memories/projects/* ~/.pi/agent/memory-projects/`）。
+- **Claude Code**：全局 `~/.claude/CLAUDE.md` 建议沉淀进 `~/.pi/agent/AGENTS.md`（指令层）；项目 `CLAUDE.md` 属指令文件保留原位，事实类记忆按 type 写入项目层。
+- 迁移前请备份：`tar czf backup.tgz -C ~ .pi/agent/memory .zcode/cli/memories`。
