@@ -1,0 +1,23 @@
+{
+  "name": "pi-scoped-memory",
+  "version": "0.1.0",
+  "description": "Scoped persistent memory for pi coding agent — global + per-project layers (ZCode-style hash-keyed project roots), zero model dependency by default",
+  "keywords": ["pi", "pi-package", "pi-coding-agent", "memory", "project-memory", "scoped-memory"],
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22.0.0" },
+  "pi": { "extensions": ["./index.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
