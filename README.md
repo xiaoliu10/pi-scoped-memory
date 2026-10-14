@@ -1,4 +1,4 @@
-# pi-scoped-memory
+# @wengine-ai/pi-scoped-memory
 
 pi coding agent 的**双层持久记忆**扩展：全局层（跨项目偏好/协作方式）+ 项目层（本仓库约束/决策，ZCode 式哈希键隔离）。零运行时依赖，默认**不需要配置模型**。
 
@@ -9,7 +9,7 @@ pi coding agent 的**双层持久记忆**扩展：全局层（跨项目偏好/�
 ```bash
 # 与 pi-memory 是替代关系（工具同名冲突），先移除旧插件
 pi remove npm:pi-memory
-pi install npm:pi-scoped-memory
+pi install npm:@wengine-ai/pi-scoped-memory
 ```
 
 ## 存储布局

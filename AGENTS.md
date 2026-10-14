@@ -1,4 +1,4 @@
-# pi-scoped-memory
+# @wengine-ai/pi-scoped-memory
 
 pi coding agent 的双层持久记忆插件（全局 + 项目级，ZCode 形态）。
 
