@@ -231,4 +231,4 @@ fixtures 构造（全部走 `PI_SCOPED_MEMORY_HOME` 注入临时目录）：
 2. **全局层混合格式**：apply 的索引 upsert 假设 `- [name](name.md)` pointer 格式，而全局层现状是 HTML 注释 + 分组标题混合——upsertIndexLine 的「追加到末尾」行为在混合索引下视觉混乱（不破坏功能）。
 3. **sensitivity 标记缺失**：敏感扫描靠正则启发式，必然有误报/漏报；长期可考虑 frontmatter 加 `metadata.sensitivity`，但那是 v1 数据格式扩展，需单独拍板。
 4. **review gate 的形态**：会话内确认（轻）vs 独立 `/memory-consolidate` 命令 + 预览 UI（重，属 v2 `/memory` viewer 范畴）——v1 按会话内确认做。
-5. **Roomote 式「夜间综合」定时任务**：调研支持显式触发；desktop_schedule 每周定时跑 propose-only 供用户复查是可选项，**默认不建**，由用户决定。
+5. **类型门对 merge 的适用性（P3 回归发现，待拍板）**：当前 apply 的类型门拒所有 `project|reference` 类型的提案。但真实数据里 c3/c7/c8/c10–c25 大量是 litellm 09-25 迁移造成的「同一条目在项目层与全局层各存一份」的双层重复（`project` 类型为主）。这些的处置不是「上浮」而是「标注项目层文件为已覆盖」——消除双层重复注入的心智负担，不涉及类型门关心的上浮语义。**设计意图待确认**：类型门应只挡 promote（新建全局事实），还是也挡 merge（仅标注项目层）？当前实现按后者（保守，拒 project 类型的 merge）。若确认前者，apply 的类型门检查应改为「仅 promote decision 受类型门约束，merge/noop 不受」。

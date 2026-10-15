@@ -90,10 +90,11 @@ export default function scopedMemoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'memory_consolidate',
     label: 'Memory Consolidate',
-    description: `跨项目记忆泛化的机械部分（显式触发，零模型依赖）。
-action=propose：扫描全部项目层 + 全局层，粗筛候选簇（同 name 归一化跨 ≥2 来源），返回结构化候选；会话 agent 据候选产出 proposals 后再调 propose（带 proposals）落提案文件（.consolidation/proposals/<ts>.md），不写任何记忆层。
-action=apply：用户确认提案后，按 proposalId 确定性执行——敏感扫描→CAS 校验→写全局（force 覆盖）→源条目加 promotedTo 标注（不删）→完成验证→journal。force=true 放行敏感命中的 globalBody。
-判定规则（由调用方 LLM 执行，非本工具）：只提升 user|feedback；抹掉项目细节后仍可执行才 promote；等价重复→promote/merge、同主题不等价→noop、两条不能同时为真→conflict；与全局既有语义等价→merge；sourceProjects≥2 才 promote。`,
+    description: `跨项目记忆泛化的机械部分（显式触发，零模型依赖）。不自动写全局层。
+action=propose（无参）：扫描全部项目层 + 全局层，粗筛候选簇（同 name 归一化跨 ≥2 来源，全局既有等价条目纳入供 merge 判定，legacy- 前缀排除），返回结构化候选。会话 agent 据候选与判定规则产出 proposals 数组后，再调 propose（带 proposals）落提案文件（.consolidation/proposals/<ts>.{json,md}），不写任何记忆层。
+action=apply（带 proposalId）：用户复查 <ts>.md 并确认后执行——类型门（只 user|feedback）→敏感扫描（IP/密码/token/私钥）→CAS 校验（sha256 防 TOCTOU）→写全局（force 覆盖已有 origin + provenance）→源条目加 promotedTo 标注（不删）→完成验证+journal。force=true 放行敏感命中。
+判定规则（由会话 agent 执行，非本工具）：只提升 user|feedback；抹掉项目细节后仍可执行才 promote；等价重复→promote/merge、同主题不等价→noop、两条不能同时为真→conflict；与全局既有语义等价→merge；sourceProjects≥2 才 promote；拿不准→noop。
+review gate：propose 落提案后、apply 前，必须向用户展示提案摘要并取得确认。`,
     parameters: consolidateSchema(),
     async execute(_id: string, rawParams: unknown): Promise<{ content: Array<{ type: 'text'; text: string }>; details: Record<string, unknown> }> {
       const params = rawParams as { action?: string; proposals?: Proposal[]; proposalId?: string; force?: boolean };

@@ -39,8 +39,25 @@ pi install npm:@wengine-ai/pi-scoped-memory
 | `memory_read` | 读某层的事实文件或 MEMORY.md |
 | `memory_search` | 关键词检索（默认跨两层，大小写不敏感子串） |
 | `memory_status` | 两层 root 与事实计数 |
+| `memory_consolidate` | 跨项目记忆泛化的机械部分（显式触发，零模型依赖）。`action=propose`（默认）：扫描全部项目层 + 全局层，粗筛候选簇（同 name 归一化跨 ≥2 来源）返回结构化候选；带 `proposals` 参数时落提案文件（`.consolidation/proposals/<ts>.{json,md}`，不写记忆层）。`action=apply`：按 `proposalId` 确定性执行——类型门（只 user\|feedback）→ 敏感扫描（IP/密码/token/私钥，`force=true` 放行）→ CAS 校验（sha256 防 TOCTOU）→ 写全局（force 覆盖 + provenance）→ 源条目加 `promotedTo` 标注（不删）→ 完成验证 + journal。语义判定（promote/merge/noop/conflict）由会话 agent 完成，工具绝不自动写全局层 |
 
-frontmatter：`name` / `description` / `metadata.type: user|feedback|project|reference` / `metadata.originSessionId`（首次写入自动补，之后保留原值）。
+frontmatter：`name` / `description` / `metadata.type: user|feedback|project|reference` / `metadata.originSessionId`（首次写入自动补，之后保留原值）。consolidation apply 还会补 `metadata.sourceProjects` / `promotedFrom` / `consolidatedAt`（全局泛化事实）与 `metadata.promotedTo`（项目层源条目标注，不删文件）。
+
+## 跨项目记忆泛化
+
+`memory_consolidate` 实现「跨项目重复记忆自动泛化成全局」的**显式触发**流程（调研见 `docs/design/memory-consolidation.md`，含 Claude Code 逆向 + mem0/Letta/Graphiti/LangMem 调研）。设计哲学对齐 Claude Code——**不自动写全局层**：
+
+```
+用户/定时触发 → memory_consolidate {action:'propose'}  # 扫描+粗筛候选簇
+  → 会话 agent 据判定规则产出 proposals
+  → memory_consolidate {action:'propose', proposals:[...]}  # 落提案文件
+  → 用户复查 <ts>.md 并确认（review gate）
+  → memory_consolidate {action:'apply', proposalId:'<ts>'}  # 6 步护栏确定性执行
+```
+
+判定规则（由会话 agent 执行）：只提升 `user|feedback`；抹掉项目细节后仍可执行才 promote；等价重复→promote/merge、同主题不等价→noop、两条不能同时为真→conflict；与全局既有语义等价→merge；`sourceProjects≥2` 才 promote。
+
+护栏：类型门、敏感扫描、CAS 防 TOCTOU、provenance 溯源、journal 可回滚、源条目只加指针不删。
 
 ## 需要共享的记忆放哪？
 
