@@ -240,12 +240,38 @@ describe('applyProposal', () => {
     expect(r.errors.join('')).toMatch(/CAS/);
   });
 
-  it('类型门：globalType=project → 拒绝', () => {
-    const p = makeProposal({ globalType: 'project' as never, globalName: 'type-gate' });
+  it('类型门：promote 的 globalType=project → 拒绝', () => {
+    const p = makeProposal({ decision: 'promote', globalType: 'project' as never, globalName: 'type-gate' });
     const pid = saveProposal([p]);
     const r = applyProposal(pid);
     expect(r.skipped).toBe(1);
     expect(r.errors.join('')).toMatch(/类型门/);
+  });
+
+  it('类型门放行 merge：globalType=project 的 merge 不受类型门约束（litellm 迁移双层重复处置）', () => {
+    const g = globalMemoryRoot();
+    const a = projectMemoryRoot('/tmp/proj-a');
+    // 全局既有 project 类型条目（litellm 迁移遗留形态）
+    writeFactAt(g, 'migrated-proj-fact', 'project', '迁移遗留', '全局 project body', 'sess_migrated');
+    writeFactAt(a, 'migrated-proj-fact', 'project', '迁移遗留', '项目层副本');
+    const p = makeProposal({
+      decision: 'merge',
+      globalType: 'project' as never,
+      globalName: 'migrated-proj-fact',
+      globalBody: '全局 project body（merge 不改类型，仅标注项目层）',
+      sourceProjects: [path.basename(a)],
+      sourceFiles: [
+        { target: 'global', name: 'migrated-proj-fact', sha256: sha256Of(g, 'migrated-proj-fact') },
+        { target: 'project', projectSlug: path.basename(a), name: 'migrated-proj-fact', sha256: sha256Of(a, 'migrated-proj-fact') },
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    // merge 放行：applied=1，不因 project 类型被挡
+    expect(r.applied).toBe(1);
+    expect(r.skipped).toBe(0);
+    // 项目层加标注（处置双层重复）
+    expect(fs.readFileSync(path.join(a, 'migrated-proj-fact.md'), 'utf8')).toContain('promotedTo: migrated-proj-fact');
   });
 
   it('merge：全局已有等价条目 → force 覆盖全局 + 源标注', () => {

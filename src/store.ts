@@ -348,9 +348,10 @@ export function applyProposal(proposalId: string, force = false): ApplyResult {
 
   for (const p of record.proposals) {
     if (p.decision === 'noop' || p.decision === 'conflict') { skipped++; continue; }
-    // 类型门：只允许 user|feedback
-    if (p.globalType !== 'user' && p.globalType !== 'feedback') {
-      skipped++; errors.push(`[${p.id}] 类型门拦截：globalType=${p.globalType}（只允许 user|feedback）`); continue;
+    // 类型门：只挡 promote（新建全局上浮），放行 merge（merge 的对象是既有全局条目，非上浮，仅标注项目层为已覆盖）。
+    // 设计依据 §5 盲区第 5 点：litellm 迁移遗留大量 project 类型双层重复，merge 处置不上浮、类型门不应挡。
+    if (p.decision === 'promote' && p.globalType !== 'user' && p.globalType !== 'feedback') {
+      skipped++; errors.push(`[${p.id}] 类型门拦截：promote 的 globalType=${p.globalType}（只允许 user|feedback）`); continue;
     }
     // ① 敏感扫描
     const sensitive = scanSensitive(p.globalBody);
