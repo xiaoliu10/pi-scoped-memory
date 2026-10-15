@@ -4,8 +4,9 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { containedPath, ensureDir, enumerateProjectRoots, factFile, globalMemoryRoot, indexFile, projectMemoryRoot } from './paths.js';
-import { indexLine, parseFact, readText, renderFact, upsertIndexLine, type FactMeta, type FactType } from './facts.js';
+import { appendPromotedToAnnotation, indexLine, parseFact, readText, renderFact, upsertIndexLine, type FactMeta, type FactType } from './facts.js';
 
 export type Target = 'global' | 'project';
 
@@ -247,4 +248,168 @@ export function collectConsolidationCandidates(): CandidateCluster[] {
   // 簇内成员按 (global 优先, 然后 slug) 排序，便于 LLM 对照
   clusters.sort((a, b) => b.members.length - a.members.length);
   return clusters;
+}
+
+// ─── P2：propose 落提案 + apply 确定性执行（护栏）──────────────────────────
+
+/** 单条泛化提案（由会话 LLM 据候选簇产出，apply 按此确定性执行）。 */
+export interface Proposal {
+  id: string;                  // 引用候选簇 id（c1, c2…），便于审计
+  decision: 'promote' | 'merge' | 'noop' | 'conflict';
+  globalName: string;          // 目标全局事实名（promote 新建 / merge 既有）
+  globalType: 'user' | 'feedback'; // 类型门：只允许 user|feedback 上浮
+  globalBody: string;
+  sourceProjects: string[];    // 来源项目 slug
+  sourceFiles: Array<{ target: Target; projectSlug?: string; name: string; sha256: string }>; // CAS 锚点
+  reasoning: string;
+}
+
+export interface ProposalRecord {
+  proposalId: string;          // 时间戳 id
+  createdAt: string;
+  proposals: Proposal[];
+}
+
+export interface ApplyResult {
+  ok: boolean;
+  proposalId: string;
+  applied: number;
+  skipped: number;
+  errors: string[];
+  journalFile?: string;
+}
+
+/** 敏感模式扫描（apply 第①步）：命中返回命中模式列表。 */
+const SENSITIVE_PATTERNS: Array<{ name: string; re: RegExp }> = [
+  { name: 'ipv4', re: /\b(?:\d{1,3}\.){3}\d{1,3}\b/ },
+  { name: 'password-eq', re: /(?:password|passwd|pwd)\s*[:=]\s*\S+/i },
+  { name: 'secret-eq', re: /(?:secret|api[_-]?key|token|access[_-]?key)\s*[:=]\s*[A-Za-z0-9_\-]{8,}/i },
+  { name: 'private-key', re: /-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----/ },
+];
+export function scanSensitive(text: string): string[] {
+  const hits: string[] = [];
+  for (const { name, re } of SENSITIVE_PATTERNS) {
+    if (re.test(text)) hits.push(name);
+  }
+  return hits;
+}
+
+/** sha256（CAS 锚点）。 */
+function sha256File(file: string): string | null {
+  try {
+    return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  } catch { return null; }
+}
+
+function timestampId(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+}
+
+/** 落提案（propose 第⑤步）：写 .consolidation/proposals/<ts>.{json,md}，返回 proposalId。 */
+export function saveProposal(proposals: Proposal[]): string {
+  const dir = path.join(globalMemoryRoot(), '.consolidation', 'proposals');
+  ensureDir(dir);
+  const id = timestampId();
+  const record: ProposalRecord = { proposalId: id, createdAt: new Date().toISOString(), proposals };
+  fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(record, null, 2));
+  // 人类可读预览（review gate 展示物）
+  const md = proposals.map((p) =>
+    `### [${p.id}] ${p.decision} → ${p.globalName} (type=${p.globalType})\n来源: ${p.sourceProjects.join(', ')}\n理由: ${p.reasoning}\n\n${p.globalBody}\n`
+  ).join('\n');
+  fs.writeFileSync(path.join(dir, `${id}.md`), `# Consolidation Proposal ${id}\n\n${md}\n`);
+  return id;
+}
+
+export function loadProposal(proposalId: string): ProposalRecord | null {
+  const file = path.join(globalMemoryRoot(), '.consolidation', 'proposals', `${proposalId}.json`);
+  const raw = readText(file);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as ProposalRecord; } catch { return null; }
+}
+
+/**
+ * apply 提案（确定性执行，6 步护栏）。
+ * force=true 时放行敏感命中的 globalBody（仍记录在 errors）。
+ * 完成标准：每个 proposal 的全局正文 + 全局索引 + 全部源标注均落盘才算 applied；否则 skipped + errors。
+ * journal 记录写入前状态（回滚依据）。
+ */
+export function applyProposal(proposalId: string, force = false): ApplyResult {
+  const record = loadProposal(proposalId);
+  if (!record) return { ok: false, proposalId, applied: 0, skipped: 0, errors: [`proposal not found: ${proposalId}`] };
+
+  const gRoot = globalMemoryRoot();
+  const journalDir = path.join(gRoot, '.consolidation', 'journal');
+  ensureDir(journalDir);
+  const journalFile = path.join(journalDir, `${timestampId()}.json`);
+  const journal: Array<{ proposal: string; action: string; file: string; beforeSha?: string | null; ok: boolean }> = [];
+
+  let applied = 0, skipped = 0;
+  const errors: string[] = [];
+
+  for (const p of record.proposals) {
+    if (p.decision === 'noop' || p.decision === 'conflict') { skipped++; continue; }
+    // 类型门：只允许 user|feedback
+    if (p.globalType !== 'user' && p.globalType !== 'feedback') {
+      skipped++; errors.push(`[${p.id}] 类型门拦截：globalType=${p.globalType}（只允许 user|feedback）`); continue;
+    }
+    // ① 敏感扫描
+    const sensitive = scanSensitive(p.globalBody);
+    if (sensitive.length && !force) {
+      skipped++; errors.push(`[${p.id}] 敏感命中 ${sensitive.join(',')}（force=true 才放行）`); continue;
+    }
+    // ② CAS 校验源文件
+    let casOk = true;
+    for (const src of p.sourceFiles) {
+      const root = src.target === 'global' ? gRoot : path.join(path.dirname(gRoot), 'memory-projects', src.projectSlug!);
+      const file = factFile(root, src.name);
+      if (!file) { casOk = false; errors.push(`[${p.id}] 源文件名非法: ${src.name}`); break; }
+      const cur = sha256File(file);
+      if (cur !== src.sha256) { casOk = false; errors.push(`[${p.id}] CAS 失败: ${src.name} 已变更（TOCTOU）`); break; }
+    }
+    if (!casOk) { skipped++; continue; }
+
+    // ③ 写全局（force 覆盖已有 origin；frontmatter 补 provenance）
+    const gFile = factFile(gRoot, p.globalName);
+    if (!gFile) { skipped++; errors.push(`[${p.id}] 全局名非法: ${p.globalName}`); continue; }
+    const gBeforeSha = sha256File(gFile);
+    const existing = readText(gFile);
+    const meta: FactMeta = {
+      name: p.globalName,
+      description: p.reasoning.slice(0, 120),
+      type: p.globalType,
+      originSessionId: `consolidated-${record.proposalId}`,
+    };
+    const bodyWithProv = `${p.globalBody}\n\n> Promoted from ${p.sourceProjects.join(', ')}（proposal ${record.proposalId}, ${new Date().toISOString().slice(0,10)}）`;
+    try {
+      fs.writeFileSync(gFile, renderFact(existing, meta, bodyWithProv, true));
+    } catch (e) {
+      skipped++; errors.push(`[${p.id}] 全局写入失败: ${(e as Error).message}`); continue;
+    }
+    // ④ 全局索引 upsert
+    const idxPath = indexFile(gRoot);
+    const idxBefore = readText(idxPath) ?? '# Memory Index\n';
+    try {
+      fs.writeFileSync(idxPath, upsertIndexLine(idxBefore, indexLine(meta), p.globalName));
+    } catch (e) {
+      errors.push(`[${p.id}] 索引写入失败（全局正文已写）: ${(e as Error).message}`);
+    }
+
+    // ⑤ 源标注：项目层源条目加 promotedTo（非破坏性，不删）
+    for (const src of p.sourceFiles) {
+      if (src.target === 'global') continue; // 全局既有等价条目（merge 场景）不加标注
+      const root = path.join(path.dirname(gRoot), 'memory-projects', src.projectSlug!);
+      const file = factFile(root, src.name);
+      if (!file) continue;
+      const before = readText(file);
+      if (!before) continue;
+      const annotated = appendPromotedToAnnotation(before, p.globalName, `Promoted to global memory \`${p.globalName}\` (${record.proposalId}). 原项目层文件保留作语境细节。`);
+      try { fs.writeFileSync(file, annotated); } catch { /* 标注失败不回滚全局 */ }
+    }
+
+    journal.push({ proposal: p.id, action: `write global ${p.globalName} + annotate ${p.sourceFiles.length} sources`, file: gFile, beforeSha: gBeforeSha, ok: true });
+    applied++;
+  }
+
+  try { fs.writeFileSync(journalFile, JSON.stringify({ proposalId: record.proposalId, journal }, null, 2)); } catch { /* journal 失败不影响已应用 */ }
+  return { ok: skipped === 0, proposalId: record.proposalId, applied, skipped, errors, journalFile };
 }

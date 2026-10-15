@@ -7,7 +7,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { buildMemoryBlock } from './src/inject.js';
-import { collectConsolidationCandidates, memoryStatus, readMemory, searchMemory, writeFact, type CandidateCluster, type Target } from './src/store.js';
+import { applyProposal, collectConsolidationCandidates, loadProposal, memoryStatus, readMemory, saveProposal, searchMemory, writeFact, type CandidateCluster, type Proposal, type Target } from './src/store.js';
 
 export default function scopedMemoryExtension(pi: ExtensionAPI) {
   let memoryBlock = '';
@@ -90,23 +90,45 @@ export default function scopedMemoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: 'memory_consolidate',
     label: 'Memory Consolidate',
-    description: `跨项目记忆泛化的机械部分（显式触发，零模型依赖）。action=propose：扫描全部项目层 + 全局层，粗筛候选簇（同 name 归一化跨 ≥2 来源），返回结构化候选供会话 agent 裁决。判定规则（由调用方 LLM 执行，非本工具）：只提升 user|feedback；抹掉项目细节后仍可执行才 promote；等价重复→promote/merge、同主题不等价→noop、两条不能同时为真→conflict；与全局既有语义等价→merge；sourceProjects≥2 才 promote。本工具绝不自动写全局层——propose 只产候选，apply 由用户确认后另行执行（P2）。`,
+    description: `跨项目记忆泛化的机械部分（显式触发，零模型依赖）。
+action=propose：扫描全部项目层 + 全局层，粗筛候选簇（同 name 归一化跨 ≥2 来源），返回结构化候选；会话 agent 据候选产出 proposals 后再调 propose（带 proposals）落提案文件（.consolidation/proposals/<ts>.md），不写任何记忆层。
+action=apply：用户确认提案后，按 proposalId 确定性执行——敏感扫描→CAS 校验→写全局（force 覆盖）→源条目加 promotedTo 标注（不删）→完成验证→journal。force=true 放行敏感命中的 globalBody。
+判定规则（由调用方 LLM 执行，非本工具）：只提升 user|feedback；抹掉项目细节后仍可执行才 promote；等价重复→promote/merge、同主题不等价→noop、两条不能同时为真→conflict；与全局既有语义等价→merge；sourceProjects≥2 才 promote。`,
     parameters: consolidateSchema(),
-    async execute(_id: string, rawParams: unknown) {
-      const params = rawParams as { action?: string };
-      if ((params.action ?? 'propose') !== 'propose') {
-        return { content: [{ type: 'text' as const, text: 'Error: P1 仅支持 action=propose（apply 在 P2）' }], details: { clusters: [] as CandidateCluster[] } };
+    async execute(_id: string, rawParams: unknown): Promise<{ content: Array<{ type: 'text'; text: string }>; details: Record<string, unknown> }> {
+      const params = rawParams as { action?: string; proposals?: Proposal[]; proposalId?: string; force?: boolean };
+      const action = params.action ?? 'propose';
+
+      if (action === 'propose') {
+        if (params.proposals?.length) {
+          // 二次调用：落提案
+          const pid = saveProposal(params.proposals);
+          return { content: [{ type: 'text', text: `Proposal saved: ${pid}\nReview ${pid}.md then call memory_consolidate {action:'apply', proposalId:'${pid}'} after user confirms.` }], details: { proposalId: pid } };
+        }
+        const clusters = collectConsolidationCandidates();
+        if (!clusters.length) {
+          return { content: [{ type: 'text', text: 'No consolidation candidates found.' }], details: { clusters: [] as CandidateCluster[] } };
+        }
+        const lines = clusters.map((c) => {
+          const head = `[${c.id}] key=${c.key}（${c.members.length} 条，来源 ${c.projectSlugs.length} 项目${c.hasGlobalMember ? ' + 全局既有' : ''}）`;
+          const ms = c.members.map((m) => `  - ${m.target}${m.projectSlug ? '/' + m.projectSlug : ''} ${m.name} [type=${m.type ?? '?'}] — ${m.description.slice(0, 80)}`);
+          return [head, ...ms].join('\n');
+        });
+        return { content: [{ type: 'text', text: lines.join('\n\n') }], details: { clusters } };
       }
-      const clusters = collectConsolidationCandidates();
-      if (!clusters.length) {
-        return { content: [{ type: 'text' as const, text: 'No consolidation candidates found.' }], details: { clusters } };
+
+      if (action === 'apply') {
+        if (!params.proposalId) {
+          return { content: [{ type: 'text', text: 'Error: apply 需要 proposalId' }], details: { applied: 0 } };
+        }
+        const result = applyProposal(params.proposalId, params.force === true);
+        const text = result.ok
+          ? `Applied ${result.applied} proposal(s). Journal: ${result.journalFile ?? 'n/a'}`
+          : `Applied ${result.applied}, skipped ${result.skipped}. Errors:\n${result.errors.join('\n')}`;
+        return { content: [{ type: 'text', text }], details: { result } };
       }
-      const lines = clusters.map((c) => {
-        const head = `[${c.id}] key=${c.key}（${c.members.length} 条，来源 ${c.projectSlugs.length} 项目${c.hasGlobalMember ? ' + 全局既有' : ''}）`;
-        const ms = c.members.map((m) => `  - ${m.target}${m.projectSlug ? '/' + m.projectSlug : ''} ${m.name} [type=${m.type ?? '?'}] — ${m.description.slice(0, 80)}`);
-        return [head, ...ms].join('\n');
-      });
-      return { content: [{ type: 'text', text: lines.join('\n\n') }], details: { clusters } };
+
+      return { content: [{ type: 'text', text: `Error: unknown action ${action}` }], details: {} };
     },
   });
 }
@@ -147,7 +169,10 @@ function emptySchema() {
 function consolidateSchema() {
   const { Type } = typebox();
   return Type.Object({
-    action: Type.Optional(Type.Literal('propose', { description: 'P1 仅支持 propose：扫描+粗筛候选簇（默认）' })),
+    action: Type.Optional(Type.Union([Type.Literal('propose'), Type.Literal('apply')], { description: 'propose=扫描候选/落提案（默认）；apply=按 proposalId 执行' })),
+    proposals: Type.Optional(Type.Array(Type.Object({}), { description: 'propose 二次调用时传入的结构化提案数组' })),
+    proposalId: Type.Optional(Type.String({ description: 'apply 时传入的提案 id' })),
+    force: Type.Optional(Type.Boolean({ description: 'apply 时放行敏感命中的 globalBody（默认 false）' })),
   });
 }
 // typebox 由 pi host 提供（peerDependencies *），经 createRequire 从扩展位置解析。

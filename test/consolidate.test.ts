@@ -3,7 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import { clearProjectRootCache, enumerateProjectRoots, projectMemoryRoot, globalMemoryRoot } from '../src/paths.js';
-import { collectConsolidationCandidates, collectProjectFacts, readGlobalFacts } from '../src/store.js';
+import { applyProposal, collectConsolidationCandidates, collectProjectFacts, loadProposal, readGlobalFacts, saveProposal, scanSensitive, type Proposal } from '../src/store.js';
+import { createHash } from 'node:crypto';
 
 function tmpHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'pi-sm-cons-'));
@@ -104,5 +105,190 @@ describe('collectConsolidationCandidates', () => {
     expect(readGlobalFacts()).toHaveLength(1);
     expect(collectProjectFacts()).toHaveLength(1);
     expect(collectConsolidationCandidates()).toHaveLength(0); // 不同 name，不成簇
+  });
+});
+
+describe('scanSensitive', () => {
+  it('命中 IP / 密码 / token / 私钥', () => {
+    expect(scanSensitive('connect to 10.20.30.201 via ssh')).toContain('ipv4');
+    expect(scanSensitive('password: hunter2')).toContain('password-eq');
+    expect(scanSensitive('api_key=sk-abcdef123456')).toContain('secret-eq');
+    expect(scanSensitive('-----BEGIN RSA PRIVATE KEY-----')).toContain('private-key');
+  });
+  it('正常文本无命中', () => {
+    expect(scanSensitive('用户偏好用 pnpm 打包，中文回复')).toEqual([]);
+  });
+});
+
+function sha256Of(root: string, name: string): string {
+  return createHash('sha256').update(fs.readFileSync(path.join(root, `${name}.md`))).digest('hex');
+}
+
+function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
+  return {
+    id: 'c1',
+    decision: 'promote',
+    globalName: 'pref-pnpm',
+    globalType: 'user',
+    globalBody: '用户偏好用 pnpm 管理前端依赖。',
+    sourceProjects: ['proj-a', 'proj-b'],
+    sourceFiles: [],
+    reasoning: '两项目均出现 pnpm 偏好',
+    ...overrides,
+  };
+}
+
+describe('saveProposal / loadProposal', () => {
+  it('落盘 json + md，可按 id 读回', () => {
+    const pid = saveProposal([makeProposal()]);
+    expect(pid).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const rec = loadProposal(pid);
+    expect(rec).not.toBeNull();
+    expect(rec!.proposals).toHaveLength(1);
+    expect(rec!.proposals[0]!.globalName).toBe('pref-pnpm');
+    expect(fs.existsSync(path.join(globalMemoryRoot(), '.consolidation', 'proposals', `${pid}.md`))).toBe(true);
+  });
+  it('loadProposal 不存在的 id 返回 null', () => {
+    expect(loadProposal('nonexistent')).toBeNull();
+  });
+});
+
+describe('applyProposal', () => {
+  it('promote：写全局 + 索引 + 源标注全部落盘', () => {
+    const a = projectMemoryRoot('/tmp/proj-a');
+    const b = projectMemoryRoot('/tmp/proj-b');
+    writeFactAt(a, 'pref-pnpm', 'user', '用 pnpm', 'body A');
+    writeFactAt(b, 'pref-pnpm', 'user', '用 pnpm', 'body B');
+    const p = makeProposal({
+      sourceFiles: [
+        { target: 'project', projectSlug: path.basename(a), name: 'pref-pnpm', sha256: sha256Of(a, 'pref-pnpm') },
+        { target: 'project', projectSlug: path.basename(b), name: 'pref-pnpm', sha256: sha256Of(b, 'pref-pnpm') },
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    expect(r.ok).toBe(true);
+    expect(r.applied).toBe(1);
+    // 全局事实存在
+    const gFile = path.join(globalMemoryRoot(), 'pref-pnpm.md');
+    expect(fs.existsSync(gFile)).toBe(true);
+    expect(fs.readFileSync(gFile, 'utf8')).toContain('Promoted from');
+    // 全局索引含 pointer
+    expect(fs.readFileSync(path.join(globalMemoryRoot(), 'MEMORY.md'), 'utf8')).toMatch(/pref-pnpm\.md/);
+    // 源标注
+    expect(fs.readFileSync(path.join(a, 'pref-pnpm.md'), 'utf8')).toContain('promotedTo: pref-pnpm');
+    expect(fs.readFileSync(path.join(b, 'pref-pnpm.md'), 'utf8')).toContain('promotedTo: pref-pnpm');
+  });
+
+  it('敏感命中且未 force → 拒绝，不写全局', () => {
+    const a = projectMemoryRoot('/tmp/proj-a');
+    const b = projectMemoryRoot('/tmp/proj-b');
+    writeFactAt(a, 'ssh-access', 'project', 'ssh', 'body A');
+    writeFactAt(b, 'ssh-access', 'project', 'ssh', 'body B');
+    const p = makeProposal({
+      globalName: 'ssh-access', globalType: 'feedback',
+      globalBody: '测试服务器 10.20.30.201 的 SSH 要用 sshpass',
+      sourceFiles: [
+        { target: 'project', projectSlug: path.basename(a), name: 'ssh-access', sha256: sha256Of(a, 'ssh-access') },
+        { target: 'project', projectSlug: path.basename(b), name: 'ssh-access', sha256: sha256Of(b, 'ssh-access') },
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    expect(r.ok).toBe(false);
+    expect(r.applied).toBe(0);
+    expect(r.skipped).toBe(1);
+    expect(r.errors.join('')).toMatch(/敏感.*ipv4/);
+    expect(fs.existsSync(path.join(globalMemoryRoot(), 'ssh-access.md'))).toBe(false);
+  });
+
+  it('敏感命中且 force=true → 放行但记录', () => {
+    const a = projectMemoryRoot('/tmp/proj-a');
+    const b = projectMemoryRoot('/tmp/proj-b');
+    writeFactAt(a, 'deploy-host', 'user', 'h', 'b A');
+    writeFactAt(b, 'deploy-host', 'user', 'h', 'b B');
+    const p = makeProposal({
+      globalName: 'deploy-host', globalType: 'user',
+      globalBody: '部署主机 192.168.1.1',
+      sourceFiles: [
+        { target: 'project', projectSlug: path.basename(a), name: 'deploy-host', sha256: sha256Of(a, 'deploy-host') },
+        { target: 'project', projectSlug: path.basename(b), name: 'deploy-host', sha256: sha256Of(b, 'deploy-host') },
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid, true);
+    expect(r.applied).toBe(1);
+    expect(fs.existsSync(path.join(globalMemoryRoot(), 'deploy-host.md'))).toBe(true);
+  });
+
+  it('CAS 失败（源文件中途被改）→ 跳过该项', () => {
+    const a = projectMemoryRoot('/tmp/proj-a');
+    const b = projectMemoryRoot('/tmp/proj-b');
+    writeFactAt(a, 'cas-fact', 'user', 'c', 'body A');
+    writeFactAt(b, 'cas-fact', 'user', 'c', 'body B');
+    const p = makeProposal({
+      globalName: 'cas-fact', globalType: 'user', globalBody: '泛化 body',
+      sourceFiles: [
+        { target: 'project', projectSlug: path.basename(a), name: 'cas-fact', sha256: sha256Of(a, 'cas-fact') },
+        { target: 'project', projectSlug: path.basename(b), name: 'cas-fact', sha256: 'deadbeef' }, // 错误 hash
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    expect(r.applied).toBe(0);
+    expect(r.skipped).toBe(1);
+    expect(r.errors.join('')).toMatch(/CAS/);
+  });
+
+  it('类型门：globalType=project → 拒绝', () => {
+    const p = makeProposal({ globalType: 'project' as never, globalName: 'type-gate' });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    expect(r.skipped).toBe(1);
+    expect(r.errors.join('')).toMatch(/类型门/);
+  });
+
+  it('merge：全局已有等价条目 → force 覆盖全局 + 源标注', () => {
+    const g = globalMemoryRoot();
+    const a = projectMemoryRoot('/tmp/proj-a');
+    writeFactAt(g, 'existing-fact', 'user', '旧描述', '旧 body', 'sess_orig');
+    writeFactAt(a, 'existing-fact', 'user', '项目版', '项目 body');
+    const p = makeProposal({
+      decision: 'merge', globalName: 'existing-fact', globalType: 'user',
+      globalBody: '更新后的全局 body',
+      sourceFiles: [
+        { target: 'global', name: 'existing-fact', sha256: sha256Of(g, 'existing-fact') },
+        { target: 'project', projectSlug: path.basename(a), name: 'existing-fact', sha256: sha256Of(a, 'existing-fact') },
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    expect(r.applied).toBe(1);
+    // 全局被 force 覆盖（renderFact force=true 路径）
+    expect(fs.readFileSync(path.join(g, 'existing-fact.md'), 'utf8')).toContain('更新后的全局 body');
+    expect(fs.readFileSync(path.join(g, 'existing-fact.md'), 'utf8')).toContain('consolidated-');
+    // 项目层加标注
+    expect(fs.readFileSync(path.join(a, 'existing-fact.md'), 'utf8')).toContain('promotedTo: existing-fact');
+  });
+
+  it('journal 落盘', () => {
+    const a = projectMemoryRoot('/tmp/proj-a');
+    const b = projectMemoryRoot('/tmp/proj-b');
+    writeFactAt(a, 'j-fact', 'user', 'j', 'bA');
+    writeFactAt(b, 'j-fact', 'user', 'j', 'bB');
+    const p = makeProposal({
+      globalName: 'j-fact', globalType: 'user', globalBody: '泛化',
+      sourceFiles: [
+        { target: 'project', projectSlug: path.basename(a), name: 'j-fact', sha256: sha256Of(a, 'j-fact') },
+        { target: 'project', projectSlug: path.basename(b), name: 'j-fact', sha256: sha256Of(b, 'j-fact') },
+      ],
+    });
+    const pid = saveProposal([p]);
+    const r = applyProposal(pid);
+    expect(r.journalFile).toBeDefined();
+    expect(fs.existsSync(r.journalFile!)).toBe(true);
+    const j = JSON.parse(fs.readFileSync(r.journalFile!, 'utf8'));
+    expect(j.journal).toHaveLength(1);
+    expect(j.journal[0].ok).toBe(true);
   });
 });

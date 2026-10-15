@@ -52,17 +52,49 @@ function parseFrontmatter(block: string): FactMeta | null {
   return { name, description, type: validType, originSessionId: origin || undefined };
 }
 
-/** 生成事实文件全文。origin 缺失时补入；已有 origin 原样保留 body 原文。 */
-export function renderFact(existing: string | null, meta: FactMeta, body: string): string {
+/** 生成事实文件全文。origin 缺失时补入；已有 origin 原样保留 body 原文。
+ *  force=true（consolidation apply 用）：已有 origin 也允许重写 frontmatter + body。
+ *  默认 force=false，行为不变——writeFact 不受影响。 */
+export function renderFact(existing: string | null, meta: FactMeta, body: string, force = false): string {
   if (existing !== null) {
     const parsed = parseFact(existing);
-    // 已有非空 origin：整文件原样保留（由调用方决定覆盖策略），这里不重写。
-    if (parsed.meta?.originSessionId) return existing;
-    // 缺 origin：只补 frontmatter，body 保持原文。
-    const head = renderFrontmatter({ ...meta, originSessionId: parsed.meta?.originSessionId ?? meta.originSessionId });
-    return `${head}\n${parsed.body}`;
+    // 已有非空 origin 且未强制：整文件原样保留（由调用方决定覆盖策略）。
+    if (parsed.meta?.originSessionId && !force) return existing;
+    // 缺 origin 或 force：补/重写 frontmatter，body 按传入值（force 用新 body，否则保持原文）。
+    // force 时优先用传入的 meta.originSessionId 覆盖旧 origin（consolidation 覆盖语义）。
+    const useBody = force ? body.replace(/\n+$/, '') : parsed.body;
+    const origin = force ? (meta.originSessionId ?? parsed.meta?.originSessionId) : (parsed.meta?.originSessionId ?? meta.originSessionId);
+    const head = renderFrontmatter({ ...meta, originSessionId: origin });
+    return `${head}\n${useBody}`;
   }
   return `${renderFrontmatter(meta)}\n${body.replace(/\n+$/, '')}\n`;
+}
+
+/**
+ * 给项目层源条目加 promotedTo 标注（consolidation apply 的非破坏性处置）。
+ * frontmatter metadata 块加 promotedTo 字段；body 尾追加人类可读注释。
+ * 已有 promotedTo 则原样返回（幂等）。返回新文件全文。
+ */
+export function appendPromotedToAnnotation(raw: string, promotedTo: string, note: string): string {
+  const normalized = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+  // 已标注过同一个 promotedTo → 幂等（用 includes 避免 RegExp 转义问题）
+  if (normalized.includes(`promotedTo: ${promotedTo}`)) {
+    return raw;
+  }
+  // 在 frontmatter 闭合行 ---\n 前插入 promotedTo（找第一个 --- 后的闭合 ---）
+  // 格式：---\n<frontmatter body>\n---\n
+  const fmClose = normalized.indexOf('\n---\n', normalized.indexOf('---\n') >= 0 ? 4 : 0);
+  let withFm: string;
+  if (fmClose >= 0) {
+    withFm = normalized.slice(0, fmClose) + `  promotedTo: ${promotedTo}\n` + normalized.slice(fmClose);
+  } else {
+    // 无 frontmatter：不动 frontmatter，只补 body 注释
+    withFm = normalized;
+  }
+  // body 尾追加注释（若已包含同一注释则不重复，用 includes 避免正则转义问题）
+  const noteMarker = note.slice(0, 40);
+  if (withFm.includes(noteMarker)) return withFm;
+  return `${withFm.replace(/\n+$/, '')}\n\n> ${note}\n`;
 }
 
 function renderFrontmatter(meta: FactMeta): string {

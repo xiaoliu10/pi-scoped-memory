@@ -201,7 +201,7 @@ LLM 全程只做两件事：裁决候选、起草全局 body 文本。**永远�
 
 - **P0（可选 PoC，0.5 天）**：用现成工具手动跑一次全流程——agent 读全部项目层 MEMORY.md → 产出泛化提案给用户 → 手工 apply。验证判定规则与真实数据质量，产出第一份真实提案样本。
 - **P1（最小可验证切片，推荐起点）**：`enumerateProjectRoots()` + `collectProjectFacts()` + `readGlobalFacts()` + propose（无 proposals 落盘，直接返回候选 JSON）+ 单测。**无 LLM、无写入**。会话里 agent 拿到候选即可手动泛化。— **已完成（2026-10-15，feat/memory-consolidate-p1 分支）**：真实数据冒烟产出 25 个候选簇，正确识别 P0 已 promote 的 user-jason-profile（项目层+全局既有 merge 候选）与 09-25 litellm 迁移遗留的全量双层重复（c2-c9），legacy 归档前缀过滤干净。发现并修复 `isLegacy` 漏判 `legacy-` 前缀（原只挡 `legacy-local-`）。
-- **P2**：提案落盘 + apply（敏感扫描/CAS/journal/验证）+ `renderFact force` 选项 + 单测。
+- **P2**：提案落盘 + apply（敏感扫描/CAS/journal/验证）+ `renderFact force` 选项 + 单测。— **已完成（2026-10-15，feat/memory-consolidate-p1 分支续交）**：端到端冒烟验证 promote 路径——全局文件写入（consolidated origin + provenance）+ 索引 pointer + 源条目 promotedTo 标注全部落盘；修复了一个真实 bug（`sha256File` 用 `require('node:crypto')` 在 ESM 静默返回 null，所有 CAS 校验都会误判 TOCTOU——改用顶部 import createHash）。
 - **P3**：工具 description 完整判定规则打磨 + README + 真实数据回归跑一轮（人工验收提案质量）。
 - **明确不做**：后台自动触发（证据全反对）；embedding 语义聚类（v2 接 qmd 后再评估）；源条目删除（只加指针）。
 
