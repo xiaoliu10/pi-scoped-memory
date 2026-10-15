@@ -1,6 +1,6 @@
 {
   "name": "@wengine-ai/pi-scoped-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Scoped persistent memory for pi coding agent — global + per-project layers (ZCode-style hash-keyed project roots), zero model dependency by default",
   "keywords": [
     "pi",
@@ -12,6 +12,9 @@
   ],
   "license": "MIT",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22.0.0"
   },
