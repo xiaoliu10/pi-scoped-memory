@@ -17,6 +17,11 @@ const SENSITIVE_NAME = /[<>:"|?*\u0000-\u001f]/;
 /** 会话级缓存：同一 root 解析结果在进程内冻结（Bash cd 不换 root）。 */
 const projectRootCache = new Map<string, string>();
 
+/** 测试钩子：切换 PI_SCOPED_MEMORY_HOME 后清缓存，避免跨用例残留（生产会话无需调用）。 */
+export function clearProjectRootCache(): void {
+  projectRootCache.clear();
+}
+
 function homeRoot(): string {
   const override = process.env.PI_SCOPED_MEMORY_HOME;
   if (override && path.isAbsolute(override)) return override;
@@ -74,4 +79,28 @@ export function ensureDir(dir: string): void {
   } catch {
     // 实际 Write 工具会返回原始文件错误；这里保持静默。
   }
+}
+
+/**
+ * 枚举所有项目层 root：列 <home>/memory-projects/ 下每个 <slug>-<hash16> 子目录。
+ * 用于 consolidation propose 阶段的全项目扫描。不存在的母目录返回空数组。
+ * 默认排除非目录条目；返回绝对路径，不去重（hash 键已保证唯一）。
+ */
+export function enumerateProjectRoots(): string[] {
+  const parent = path.join(homeRoot(), 'memory-projects');
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(parent, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => path.join(parent, d.name));
+  } catch { /* 母目录不存在 = 无项目层 */ }
+  return entries;
+}
+
+/**
+ * consolidation 工作区根：<home>/memory/.consolidation/（ proposals/ 与 journal/ 子目录）。
+ * 放全局层内部，避免污染项目层；P1 仅暴露路径，落盘逻辑在 P2。
+ */
+export function consolidationDir(): string {
+  return path.join(globalMemoryRoot(), '.consolidation');
 }

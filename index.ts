@@ -7,7 +7,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { buildMemoryBlock } from './src/inject.js';
-import { memoryStatus, readMemory, searchMemory, writeFact, type Target } from './src/store.js';
+import { collectConsolidationCandidates, memoryStatus, readMemory, searchMemory, writeFact, type CandidateCluster, type Target } from './src/store.js';
 
 export default function scopedMemoryExtension(pi: ExtensionAPI) {
   let memoryBlock = '';
@@ -86,6 +86,29 @@ export default function scopedMemoryExtension(pi: ExtensionAPI) {
       return { content: [{ type: 'text', text: status }], details: { status } };
     },
   });
+
+  pi.registerTool({
+    name: 'memory_consolidate',
+    label: 'Memory Consolidate',
+    description: `跨项目记忆泛化的机械部分（显式触发，零模型依赖）。action=propose：扫描全部项目层 + 全局层，粗筛候选簇（同 name 归一化跨 ≥2 来源），返回结构化候选供会话 agent 裁决。判定规则（由调用方 LLM 执行，非本工具）：只提升 user|feedback；抹掉项目细节后仍可执行才 promote；等价重复→promote/merge、同主题不等价→noop、两条不能同时为真→conflict；与全局既有语义等价→merge；sourceProjects≥2 才 promote。本工具绝不自动写全局层——propose 只产候选，apply 由用户确认后另行执行（P2）。`,
+    parameters: consolidateSchema(),
+    async execute(_id: string, rawParams: unknown) {
+      const params = rawParams as { action?: string };
+      if ((params.action ?? 'propose') !== 'propose') {
+        return { content: [{ type: 'text' as const, text: 'Error: P1 仅支持 action=propose（apply 在 P2）' }], details: { clusters: [] as CandidateCluster[] } };
+      }
+      const clusters = collectConsolidationCandidates();
+      if (!clusters.length) {
+        return { content: [{ type: 'text' as const, text: 'No consolidation candidates found.' }], details: { clusters } };
+      }
+      const lines = clusters.map((c) => {
+        const head = `[${c.id}] key=${c.key}（${c.members.length} 条，来源 ${c.projectSlugs.length} 项目${c.hasGlobalMember ? ' + 全局既有' : ''}）`;
+        const ms = c.members.map((m) => `  - ${m.target}${m.projectSlug ? '/' + m.projectSlug : ''} ${m.name} [type=${m.type ?? '?'}] — ${m.description.slice(0, 80)}`);
+        return [head, ...ms].join('\n');
+      });
+      return { content: [{ type: 'text', text: lines.join('\n\n') }], details: { clusters } };
+    },
+  });
 }
 
 function inferTarget(params: Record<string, unknown>): 'global' | 'project' {
@@ -120,6 +143,12 @@ function searchSchema() {
 function emptySchema() {
   const { Type } = typebox();
   return Type.Object({});
+}
+function consolidateSchema() {
+  const { Type } = typebox();
+  return Type.Object({
+    action: Type.Optional(Type.Literal('propose', { description: 'P1 仅支持 propose：扫描+粗筛候选簇（默认）' })),
+  });
 }
 // typebox 由 pi host 提供（peerDependencies *），经 createRequire 从扩展位置解析。
 import { createRequire } from 'node:module';
