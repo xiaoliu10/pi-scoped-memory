@@ -10,7 +10,7 @@
     "project-memory",
     "scoped-memory"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
